@@ -24,10 +24,37 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Ensure Flutter project structure
+      - name: Scaffold Android if needed
         run: |
-          if [ ! -f android/app/src/main/kotlin/com/puppypay/admin/MainActivity.kt ] && [ ! -f android/app/src/main/java/com/puppypay/admin/MainActivity.java ]; then
-            flutter create . --project-name puppypay_admin --org com.puppypay --platforms=android
+          flutter create . --project-name puppypay_admin --org com.puppypay --platforms=android
+
+      - name: Force package name for Firebase
+        run: |
+          # Keep google-services.json from repo
+          if [ -f android/app/google-services.json ]; then
+            echo "google-services.json present"
+          fi
+          # Ensure applicationId matches Firebase
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/applicationId *= *.*/applicationId = "com.puppypay.admin"/' android/app/build.gradle || true
+          fi
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/applicationId *= *.*/applicationId = "com.puppypay.admin"/' android/app/build.gradle.kts || true
+          fi
+          # Ensure google-services plugin applied
+          if [ -f android/settings.gradle ]; then
+            grep -q 'com.google.gms.google-services' android/settings.gradle || \
+              sed -i '/plugins {/a\    id "com.google.gms.google-services" version "4.4.2" apply false' android/settings.gradle
+          fi
+          if [ -f android/settings.gradle.kts ]; then
+            grep -q 'com.google.gms.google-services' android/settings.gradle.kts || \
+              sed -i '/plugins {/a\    id("com.google.gms.google-services") version("4.4.2") apply false' android/settings.gradle.kts
+          fi
+          if [ -f android/app/build.gradle ] && ! grep -q 'com.google.gms.google-services' android/app/build.gradle; then
+            sed -i '/plugins {/a\    id "com.google.gms.google-services"' android/app/build.gradle
+          fi
+          if [ -f android/app/build.gradle.kts ] && ! grep -q 'com.google.gms.google-services' android/app/build.gradle.kts; then
+            sed -i '/plugins {/a\    id("com.google.gms.google-services")' android/app/build.gradle.kts
           fi
 
       - name: Get dependencies
