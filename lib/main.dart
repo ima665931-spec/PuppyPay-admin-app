@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -38,7 +39,6 @@ Future<void> setupAlertChannel() async {
       vibrationPattern: Int64List.fromList([0, 800, 400, 800, 400, 800, 400, 1200]),
       enableLights: true,
       ledColor: const Color(0xFFFF0000),
-      // Alarm stream = louder, more likely over silent/DND on many OEMs
       audioAttributesUsage: AudioAttributesUsage.alarm,
     ),
   );
@@ -49,7 +49,6 @@ Future<void> showEmergencyAlert({
   required String body,
   Map<String, dynamic>? data,
 }) async {
-  // Haptic burst when app is in foreground
   try {
     await HapticFeedback.heavyImpact();
     await Future<void>.delayed(const Duration(milliseconds: 120));
@@ -102,7 +101,6 @@ Future<void> main() async {
   final androidPlugin = localNotifs.resolvePlatformSpecificImplementation<
       AndroidFlutterLocalNotificationsPlugin>();
   await androidPlugin?.requestNotificationsPermission();
-  // Android 14+ full-screen intent permission (best-effort)
   try {
     await androidPlugin?.requestFullScreenIntentPermission();
   } catch (_) {}
@@ -355,7 +353,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// Local emergency test (does not need network) — should vibrate hard + loud heads-up
   Future<void> _testLocal() async {
     await showEmergencyAlert(
       title: 'TEST — NEW ORDER',
