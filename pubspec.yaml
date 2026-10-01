@@ -1,7 +1,7 @@
 name: puppypay_admin
 description: PuppyPay admin alert app — FCM order notifications
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -14,6 +14,7 @@ dependencies:
   firebase_core: ^3.6.0
   firebase_messaging: ^15.1.3
   flutter_local_notifications: ^17.2.3
+  audioplayers: ^6.1.0
   intl: ^0.19.0
 
 dev_dependencies:
@@ -23,3 +24,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/sounds/alert_ring.mp3
