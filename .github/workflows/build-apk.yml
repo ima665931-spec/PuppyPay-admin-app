@@ -1,0 +1,44 @@
+name: Build Admin APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Ensure Flutter project structure
+        run: |
+          if [ ! -f android/app/src/main/kotlin/com/puppypay/admin/MainActivity.kt ] && [ ! -f android/app/src/main/java/com/puppypay/admin/MainActivity.java ]; then
+            flutter create . --project-name puppypay_admin --org com.puppypay --platforms=android
+          fi
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PuppyPay-Admin-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
