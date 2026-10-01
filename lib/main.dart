@@ -2,44 +2,89 @@ import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 const String kApiBase = 'https://puppy-pay-backend.vercel.app/api/admin';
-const String kChannelId = 'order_alerts';
+/// New channel id so Android picks MAX importance (old channel stays muted forever)
+const String kChannelId = 'order_alerts_v2';
 
 final FlutterLocalNotificationsPlugin localNotifs = FlutterLocalNotificationsPlugin();
 
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
-  await _showLocalFromRemote(message);
+  await setupAlertChannel();
+  await showEmergencyAlert(
+    title: message.data['title'] ?? message.notification?.title ?? 'NEW ORDER',
+    body: message.data['body'] ?? message.notification?.body ?? 'Open PuppyPay Admin',
+    data: message.data,
+  );
 }
 
-Future<void> _showLocalFromRemote(RemoteMessage message) async {
-  final n = message.notification;
-  final title = n?.title ?? message.data['title'] ?? 'PuppyPay Order';
-  final body = n?.body ?? message.data['body'] ?? 'New order';
+Future<void> setupAlertChannel() async {
+  final android = localNotifs.resolvePlatformSpecificImplementation<
+      AndroidFlutterLocalNotificationsPlugin>();
+  await android?.createNotificationChannel(
+    AndroidNotificationChannel(
+      kChannelId,
+      'Emergency Order Alerts',
+      description: 'Full-screen style deposit/withdraw alerts',
+      importance: Importance.max,
+      playSound: true,
+      enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 800, 400, 800, 400, 800, 400, 1200]),
+      enableLights: true,
+      ledColor: const Color(0xFFFF0000),
+      // Alarm stream = louder, more likely over silent/DND on many OEMs
+      audioAttributesUsage: AudioAttributesUsage.alarm,
+    ),
+  );
+}
+
+Future<void> showEmergencyAlert({
+  required String title,
+  required String body,
+  Map<String, dynamic>? data,
+}) async {
+  // Haptic burst when app is in foreground
+  try {
+    await HapticFeedback.heavyImpact();
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    await HapticFeedback.heavyImpact();
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    await HapticFeedback.heavyImpact();
+  } catch (_) {}
+
   await localNotifs.show(
-    DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    DateTime.now().millisecondsSinceEpoch.remainder(100000),
     title,
     body,
     NotificationDetails(
       android: AndroidNotificationDetails(
         kChannelId,
-        'Order Alerts',
-        channelDescription: 'Deposit and withdraw alerts',
+        'Emergency Order Alerts',
+        channelDescription: 'Full-screen style deposit/withdraw alerts',
         importance: Importance.max,
         priority: Priority.max,
         playSound: true,
         enableVibration: true,
+        vibrationPattern: Int64List.fromList([0, 800, 400, 800, 400, 800, 400, 1200]),
         fullScreenIntent: true,
         category: AndroidNotificationCategory.alarm,
         visibility: NotificationVisibility.public,
+        ongoing: true,
+        autoCancel: false,
+        ticker: 'NEW ORDER — PuppyPay',
+        styleInformation: BigTextStyleInformation(body, contentTitle: title),
+        actions: <AndroidNotificationAction>[
+          const AndroidNotificationAction('open', 'OPEN PANEL'),
+        ],
       ),
     ),
-    payload: jsonEncode(message.data),
+    payload: jsonEncode(data ?? {}),
   );
 }
 
@@ -52,20 +97,15 @@ Future<void> main() async {
   await localNotifs.initialize(
     const InitializationSettings(android: androidInit),
   );
+  await setupAlertChannel();
 
   final androidPlugin = localNotifs.resolvePlatformSpecificImplementation<
       AndroidFlutterLocalNotificationsPlugin>();
-  await androidPlugin?.createNotificationChannel(
-    const AndroidNotificationChannel(
-      kChannelId,
-      'Order Alerts',
-      description: 'High priority deposit/withdraw alerts',
-      importance: Importance.max,
-      playSound: true,
-      enableVibration: true,
-    ),
-  );
   await androidPlugin?.requestNotificationsPermission();
+  // Android 14+ full-screen intent permission (best-effort)
+  try {
+    await androidPlugin?.requestFullScreenIntentPermission();
+  } catch (_) {}
 
   runApp(const PuppyPayAdminApp());
 }
@@ -183,7 +223,7 @@ class _LoginPageState extends State<LoginPage> {
             children: [
               const Text('PuppyPay Admin', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
               const SizedBox(height: 8),
-              Text('Order alerts · Accept / Reject', style: TextStyle(color: Colors.white54)),
+              const Text('Emergency order alerts', style: TextStyle(color: Colors.white54)),
               const SizedBox(height: 32),
               TextField(controller: userCtrl, decoration: const InputDecoration(labelText: 'Username', border: OutlineInputBorder())),
               const SizedBox(height: 12),
@@ -198,7 +238,9 @@ class _LoginPageState extends State<LoginPage> {
                 height: 48,
                 child: FilledButton(
                   onPressed: busy ? null : _login,
-                  child: busy ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Sign in'),
+                  child: busy
+                      ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Sign in'),
                 ),
               ),
             ],
@@ -240,7 +282,11 @@ class _HomePageState extends State<HomePage> {
     await _setupFcm();
     await _refresh();
     FirebaseMessaging.onMessage.listen((m) async {
-      await _showLocalFromRemote(m);
+      await showEmergencyAlert(
+        title: m.data['title'] ?? m.notification?.title ?? 'NEW ORDER',
+        body: m.data['body'] ?? m.notification?.body ?? 'Open panel',
+        data: m.data,
+      );
       _refresh();
     });
     FirebaseMessaging.onMessageOpenedApp.listen((_) => _refresh());
@@ -249,7 +295,6 @@ class _HomePageState extends State<HomePage> {
   Future<void> _setupFcm() async {
     final messaging = FirebaseMessaging.instance;
     await messaging.requestPermission(alert: true, sound: true, badge: true);
-    // High priority on Android
     await messaging.setForegroundNotificationPresentationOptions(alert: true, badge: true, sound: true);
     final token = await messaging.getToken();
     fcmToken = token;
@@ -264,7 +309,7 @@ class _HomePageState extends State<HomePage> {
         if (data['device'] != null) {
           alertsOn = data['device']['alertsEnabled'] != false;
         }
-        setState(() => status = 'FCM registered');
+        setState(() => status = 'FCM OK');
       } catch (_) {
         setState(() => status = 'FCM register failed');
       }
@@ -310,12 +355,21 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _test() async {
+  /// Local emergency test (does not need network) — should vibrate hard + loud heads-up
+  Future<void> _testLocal() async {
+    await showEmergencyAlert(
+      title: 'TEST — NEW ORDER',
+      body: 'Agar ye strong vibe + loud alert nahi aaya to phone settings check karo.',
+      data: {'kind': 'test'},
+    );
+  }
+
+  Future<void> _testRemote() async {
     final res = await http.post(Uri.parse('$kApiBase/fcm/test'), headers: headers);
     final data = jsonDecode(res.body);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(data['success'] == true ? 'Test sent' : 'Test failed — check Firebase env')),
+        SnackBar(content: Text(data['success'] == true ? 'Remote test sent' : 'Remote test failed')),
       );
     }
   }
@@ -346,11 +400,13 @@ class _HomePageState extends State<HomePage> {
             Card(
               color: alertsOn ? const Color(0xFF14532D) : const Color(0xFF450A0A),
               child: SwitchListTile(
-                title: Text(alertsOn ? 'Alerts ON' : 'Alerts OFF (class mode)',
-                    style: const TextStyle(fontWeight: FontWeight.w800)),
-                subtitle: Text(alertsOn
-                    ? 'Sound + vibration on every new order'
-                    : 'No push until you turn this ON'),
+                title: Text(
+                  alertsOn ? 'Alerts ON' : 'Alerts OFF (class mode)',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                subtitle: Text(
+                  alertsOn ? 'Emergency sound + vibration on new orders' : 'Silent until you turn ON',
+                ),
                 value: alertsOn,
                 onChanged: _toggleAlerts,
               ),
@@ -359,15 +415,22 @@ class _HomePageState extends State<HomePage> {
             Row(
               children: [
                 Expanded(
-                  child: FilledButton.tonal(
-                    onPressed: _test,
-                    child: const Text('Test alert'),
+                  child: FilledButton(
+                    onPressed: _testLocal,
+                    child: const Text('Local TEST (vibe)'),
                   ),
                 ),
                 const SizedBox(width: 8),
-                Text(status, style: const TextStyle(fontSize: 11, color: Colors.white38)),
+                Expanded(
+                  child: FilledButton.tonal(
+                    onPressed: _testRemote,
+                    child: const Text('Remote TEST'),
+                  ),
+                ),
               ],
             ),
+            const SizedBox(height: 6),
+            Text(status, style: const TextStyle(fontSize: 11, color: Colors.white38)),
             const SizedBox(height: 16),
             Text('Withdrawals (${withdrawals.length})',
                 style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
@@ -405,7 +468,12 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _orderCard({required String kind, required String id, required dynamic amount, required String subtitle}) {
+  Widget _orderCard({
+    required String kind,
+    required String id,
+    required dynamic amount,
+    required String subtitle,
+  }) {
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: Padding(
@@ -413,7 +481,10 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('₹${amount ?? 0}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF60A5FA))),
+            Text(
+              '₹${amount ?? 0}',
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF60A5FA)),
+            ),
             const SizedBox(height: 4),
             Text(subtitle, style: const TextStyle(color: Colors.white70, height: 1.35)),
             const SizedBox(height: 10),
