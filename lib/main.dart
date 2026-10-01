@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -9,10 +11,12 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 const String kApiBase = 'https://puppy-pay-backend.vercel.app/api/admin';
-/// New channel id so Android picks MAX importance (old channel stays muted forever)
-const String kChannelId = 'order_alerts_v2';
+const String kChannelId = 'order_alerts_v3';
+const int kAlertNotifId = 99101;
 
 final FlutterLocalNotificationsPlugin localNotifs = FlutterLocalNotificationsPlugin();
+final AudioPlayer ringPlayer = AudioPlayer();
+final ValueNotifier<bool> isRinging = ValueNotifier<bool>(false);
 
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -31,17 +35,38 @@ Future<void> setupAlertChannel() async {
   await android?.createNotificationChannel(
     AndroidNotificationChannel(
       kChannelId,
-      'Emergency Order Alerts',
-      description: 'Full-screen style deposit/withdraw alerts',
+      'Call-style Order Alerts',
+      description: 'Continuous ring until you stop',
       importance: Importance.max,
-      playSound: true,
+      playSound: false, // we play custom loop ourselves
       enableVibration: true,
-      vibrationPattern: Int64List.fromList([0, 800, 400, 800, 400, 800, 400, 1200]),
+      vibrationPattern: Int64List.fromList([0, 600, 300, 600, 300, 900]),
       enableLights: true,
       ledColor: const Color(0xFFFF0000),
       audioAttributesUsage: AudioAttributesUsage.alarm,
     ),
   );
+}
+
+Future<void> startRing() async {
+  try {
+    await ringPlayer.setReleaseMode(ReleaseMode.loop);
+    await ringPlayer.setVolume(1.0);
+    await ringPlayer.play(AssetSource('sounds/alert_ring.mp3'));
+    isRinging.value = true;
+  } catch (e) {
+    debugPrint('startRing error: $e');
+  }
+}
+
+Future<void> stopRing() async {
+  try {
+    await ringPlayer.stop();
+  } catch (_) {}
+  isRinging.value = false;
+  try {
+    await localNotifs.cancel(kAlertNotifId);
+  } catch (_) {}
 }
 
 Future<void> showEmergencyAlert({
@@ -51,40 +76,51 @@ Future<void> showEmergencyAlert({
 }) async {
   try {
     await HapticFeedback.heavyImpact();
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    await HapticFeedback.heavyImpact();
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    await HapticFeedback.heavyImpact();
   } catch (_) {}
 
+  await startRing();
+
   await localNotifs.show(
-    DateTime.now().millisecondsSinceEpoch.remainder(100000),
+    kAlertNotifId,
     title,
     body,
     NotificationDetails(
       android: AndroidNotificationDetails(
         kChannelId,
-        'Emergency Order Alerts',
-        channelDescription: 'Full-screen style deposit/withdraw alerts',
+        'Call-style Order Alerts',
+        channelDescription: 'Continuous ring until you stop',
         importance: Importance.max,
         priority: Priority.max,
-        playSound: true,
+        playSound: false,
         enableVibration: true,
-        vibrationPattern: Int64List.fromList([0, 800, 400, 800, 400, 800, 400, 1200]),
+        vibrationPattern: Int64List.fromList([0, 600, 300, 600, 300, 900]),
         fullScreenIntent: true,
-        category: AndroidNotificationCategory.alarm,
+        category: AndroidNotificationCategory.call,
         visibility: NotificationVisibility.public,
         ongoing: true,
         autoCancel: false,
         ticker: 'NEW ORDER — PuppyPay',
         styleInformation: BigTextStyleInformation(body, contentTitle: title),
         actions: <AndroidNotificationAction>[
-          const AndroidNotificationAction('open', 'OPEN PANEL'),
+          const AndroidNotificationAction(
+            'stop_ring',
+            'STOP RING',
+            showsUserInterface: true,
+            cancelNotification: false,
+          ),
+          const AndroidNotificationAction('open', 'OPEN'),
         ],
       ),
     ),
     payload: jsonEncode(data ?? {}),
   );
+}
+
+@pragma('vm:entry-point')
+void onNotifBackground(NotificationResponse r) {
+  if (r.actionId == 'stop_ring') {
+    // Best-effort; full stop when app opens
+  }
 }
 
 Future<void> main() async {
@@ -95,6 +131,12 @@ Future<void> main() async {
   const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
   await localNotifs.initialize(
     const InitializationSettings(android: androidInit),
+    onDidReceiveNotificationResponse: (NotificationResponse r) async {
+      if (r.actionId == 'stop_ring') {
+        await stopRing();
+      }
+    },
+    onDidReceiveBackgroundNotificationResponse: onNotifBackground,
   );
   await setupAlertChannel();
 
@@ -103,6 +145,21 @@ Future<void> main() async {
   await androidPlugin?.requestNotificationsPermission();
   try {
     await androidPlugin?.requestFullScreenIntentPermission();
+  } catch (_) {}
+
+  // Audio focus for loud playback
+  try {
+    await ringPlayer.setAudioContext(
+      AudioContext(
+        android: AudioContextAndroid(
+          isSpeakerphoneOn: true,
+          stayAwake: true,
+          contentType: AndroidContentType.sonification,
+          usageType: AndroidUsageType.alarm,
+          audioFocus: AndroidAudioFocus.gainTransientMayDuck,
+        ),
+      ),
+    );
   } catch (_) {}
 
   runApp(const PuppyPayAdminApp());
@@ -161,6 +218,7 @@ class _GateState extends State<Gate> {
     return HomePage(
       token: token!,
       onLogout: () async {
+        await stopRing();
         final p = await SharedPreferences.getInstance();
         await p.remove('admin_token');
         setState(() => token = null);
@@ -221,7 +279,7 @@ class _LoginPageState extends State<LoginPage> {
             children: [
               const Text('PuppyPay Admin', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
               const SizedBox(height: 8),
-              const Text('Emergency order alerts', style: TextStyle(color: Colors.white54)),
+              const Text('Call-style order alerts', style: TextStyle(color: Colors.white54)),
               const SizedBox(height: 32),
               TextField(controller: userCtrl, decoration: const InputDecoration(labelText: 'Username', border: OutlineInputBorder())),
               const SizedBox(height: 12),
@@ -287,13 +345,15 @@ class _HomePageState extends State<HomePage> {
       );
       _refresh();
     });
-    FirebaseMessaging.onMessageOpenedApp.listen((_) => _refresh());
+    FirebaseMessaging.onMessageOpenedApp.listen((_) async {
+      await stopRing();
+      _refresh();
+    });
   }
 
   Future<void> _setupFcm() async {
     final messaging = FirebaseMessaging.instance;
     await messaging.requestPermission(alert: true, sound: true, badge: true);
-    await messaging.setForegroundNotificationPresentationOptions(alert: true, badge: true, sound: true);
     final token = await messaging.getToken();
     fcmToken = token;
     if (token != null) {
@@ -312,14 +372,6 @@ class _HomePageState extends State<HomePage> {
         setState(() => status = 'FCM register failed');
       }
     }
-    messaging.onTokenRefresh.listen((t) async {
-      fcmToken = t;
-      await http.post(
-        Uri.parse('$kApiBase/fcm/register'),
-        headers: headers,
-        body: jsonEncode({'token': t, 'platform': 'android'}),
-      );
-    });
   }
 
   Future<void> _refresh() async {
@@ -341,22 +393,18 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _toggleAlerts(bool v) async {
     setState(() => alertsOn = v);
+    if (!v) await stopRing();
     await http.patch(
       Uri.parse('$kApiBase/fcm/alerts'),
       headers: headers,
       body: jsonEncode({'enabled': v, 'token': fcmToken}),
     );
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(v ? 'Alerts ON' : 'Alerts OFF — class mode')),
-      );
-    }
   }
 
   Future<void> _testLocal() async {
     await showEmergencyAlert(
       title: 'TEST — NEW ORDER',
-      body: 'Agar ye strong vibe + loud alert nahi aaya to phone settings check karo.',
+      body: 'Ring chalega jab tak STOP na dabao.',
       data: {'kind': 'test'},
     );
   }
@@ -372,6 +420,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _act(String kind, String id, bool accept) async {
+    await stopRing();
     final path = kind == 'deposit'
         ? '/deposits/$id/${accept ? 'accept' : 'reject'}'
         : '/withdrawals/$id/${accept ? 'accept' : 'reject'}';
@@ -394,6 +443,23 @@ class _HomePageState extends State<HomePage> {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            ValueListenableBuilder<bool>(
+              valueListenable: isRinging,
+              builder: (_, ringing, __) {
+                if (!ringing) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: SizedBox(
+                    height: 64,
+                    child: FilledButton(
+                      style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                      onPressed: stopRing,
+                      child: const Text('⏹ STOP RING', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+                    ),
+                  ),
+                );
+              },
+            ),
             Card(
               color: alertsOn ? const Color(0xFF14532D) : const Color(0xFF450A0A),
               child: SwitchListTile(
@@ -401,9 +467,7 @@ class _HomePageState extends State<HomePage> {
                   alertsOn ? 'Alerts ON' : 'Alerts OFF (class mode)',
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
-                subtitle: Text(
-                  alertsOn ? 'Emergency sound + vibration on new orders' : 'Silent until you turn ON',
-                ),
+                subtitle: Text(alertsOn ? 'Call-style ring on new orders' : 'Silent'),
                 value: alertsOn,
                 onChanged: _toggleAlerts,
               ),
@@ -414,7 +478,7 @@ class _HomePageState extends State<HomePage> {
                 Expanded(
                   child: FilledButton(
                     onPressed: _testLocal,
-                    child: const Text('Local TEST (vibe)'),
+                    child: const Text('Local TEST (ring)'),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -478,10 +542,8 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              '₹${amount ?? 0}',
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF60A5FA)),
-            ),
+            Text('₹${amount ?? 0}',
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF60A5FA))),
             const SizedBox(height: 4),
             Text(subtitle, style: const TextStyle(color: Colors.white70, height: 1.35)),
             const SizedBox(height: 10),
