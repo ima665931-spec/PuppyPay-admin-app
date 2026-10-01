@@ -33,16 +33,41 @@ jobs:
             cp /tmp/pp-fb/google-services.json android/app/google-services.json
           fi
 
-      - name: Set applicationId and Google Services plugin
+      - name: Configure Android for Firebase + desugaring
         run: |
-          # Force package name for Firebase
-          if [ -f android/app/build.gradle.kts ]; then
-            sed -i 's/applicationId = ".*"/applicationId = "com.puppypay.admin"/' android/app/build.gradle.kts
-            grep -q google-services android/app/build.gradle.kts || sed -i '/^plugins {/a\    id("com.google.gms.google-services")' android/app/build.gradle.kts
+          set -e
+          APP_GRADLE=android/app/build.gradle.kts
+          SETTINGS=android/settings.gradle.kts
+
+          # applicationId
+          sed -i 's/applicationId = ".*"/applicationId = "com.puppypay.admin"/' "$APP_GRADLE"
+
+          # google-services plugin on app
+          if ! grep -q 'com.google.gms.google-services' "$APP_GRADLE"; then
+            sed -i '/^plugins {/a\    id("com.google.gms.google-services")' "$APP_GRADLE"
           fi
-          if [ -f android/settings.gradle.kts ]; then
-            grep -q google-services android/settings.gradle.kts || sed -i '/^plugins {/a\    id("com.google.gms.google-services") version("4.4.2") apply false' android/settings.gradle.kts
+
+          # google-services on settings
+          if ! grep -q 'com.google.gms.google-services' "$SETTINGS"; then
+            sed -i '/^plugins {/a\    id("com.google.gms.google-services") version("4.4.2") apply false' "$SETTINGS"
           fi
+
+          # Enable core library desugaring (required by flutter_local_notifications)
+          if ! grep -q 'isCoreLibraryDesugaringEnabled' "$APP_GRADLE"; then
+            sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' "$APP_GRADLE"
+          fi
+
+          # Add desugar dependency
+          if ! grep -q 'desugar_jdk_libs' "$APP_GRADLE"; then
+            if grep -q '^dependencies {' "$APP_GRADLE"; then
+              sed -i '/^dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' "$APP_GRADLE"
+            else
+              printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> "$APP_GRADLE"
+            fi
+          fi
+
+          echo "--- app/build.gradle.kts ---"
+          cat "$APP_GRADLE"
           ls -la android/app/google-services.json
 
       - run: flutter pub get
