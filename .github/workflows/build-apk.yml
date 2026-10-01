@@ -21,6 +21,18 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Generate call-style alert ringtone
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          mkdir -p assets/sounds
+          # Urgent alternating tones (call-like), 4s loop source
+          ffmpeg -y -f lavfi -i "sine=frequency=1100:duration=0.2" \
+            -f lavfi -i "sine=frequency=700:duration=0.2" \
+            -filter_complex "[0:a][1:a]concat=n=2:v=0:a=1,aloop=loop=9:size=8820" \
+            -t 4 -ar 22050 -ac 1 -b:a 64k assets/sounds/alert_ring.mp3
+          ls -la assets/sounds/alert_ring.mp3
+
       - name: Scaffold clean Android project
         run: |
           mkdir -p /tmp/pp-fb
@@ -38,26 +50,16 @@ jobs:
           set -e
           APP_GRADLE=android/app/build.gradle.kts
           SETTINGS=android/settings.gradle.kts
-
-          # applicationId
           sed -i 's/applicationId = ".*"/applicationId = "com.puppypay.admin"/' "$APP_GRADLE"
-
-          # google-services plugin on app
           if ! grep -q 'com.google.gms.google-services' "$APP_GRADLE"; then
             sed -i '/^plugins {/a\    id("com.google.gms.google-services")' "$APP_GRADLE"
           fi
-
-          # google-services on settings
           if ! grep -q 'com.google.gms.google-services' "$SETTINGS"; then
             sed -i '/^plugins {/a\    id("com.google.gms.google-services") version("4.4.2") apply false' "$SETTINGS"
           fi
-
-          # Enable core library desugaring (required by flutter_local_notifications)
           if ! grep -q 'isCoreLibraryDesugaringEnabled' "$APP_GRADLE"; then
             sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' "$APP_GRADLE"
           fi
-
-          # Add desugar dependency
           if ! grep -q 'desugar_jdk_libs' "$APP_GRADLE"; then
             if grep -q '^dependencies {' "$APP_GRADLE"; then
               sed -i '/^dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' "$APP_GRADLE"
@@ -65,9 +67,6 @@ jobs:
               printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> "$APP_GRADLE"
             fi
           fi
-
-          echo "--- app/build.gradle.kts ---"
-          cat "$APP_GRADLE"
           ls -la android/app/google-services.json
 
       - run: flutter pub get
