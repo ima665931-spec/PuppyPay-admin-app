@@ -24,38 +24,55 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Scaffold Android if needed
+      - name: Clean android tree and scaffold
         run: |
-          flutter create . --project-name puppypay_admin --org com.puppypay --platforms=android
-
-      - name: Force package name for Firebase
-        run: |
-          # Keep google-services.json from repo
+          mkdir -p /tmp/pp-fb
           if [ -f android/app/google-services.json ]; then
-            echo "google-services.json present"
+            cp android/app/google-services.json /tmp/pp-fb/google-services.json
           fi
-          # Ensure applicationId matches Firebase
-          if [ -f android/app/build.gradle ]; then
-            sed -i 's/applicationId *= *.*/applicationId = "com.puppypay.admin"/' android/app/build.gradle || true
+          rm -rf android
+          flutter create . --project-name puppypay_admin --org com.puppypay --platforms=android
+          mkdir -p android/app
+          if [ -f /tmp/pp-fb/google-services.json ]; then
+            cp /tmp/pp-fb/google-services.json android/app/google-services.json
           fi
+
+      - name: Configure Firebase package + plugins
+        run: |
+          set -e
           if [ -f android/app/build.gradle.kts ]; then
-            sed -i 's/applicationId *= *.*/applicationId = "com.puppypay.admin"/' android/app/build.gradle.kts || true
+            sed -i 's/applicationId = ".*"/applicationId = "com.puppypay.admin"/' android/app/build.gradle.kts
+            if ! grep -q 'com.google.gms.google-services' android/app/build.gradle.kts; then
+              sed -i '/plugins {/a\    id("com.google.gms.google-services")' android/app/build.gradle.kts
+            fi
           fi
-          # Ensure google-services plugin applied
-          if [ -f android/settings.gradle ]; then
-            grep -q 'com.google.gms.google-services' android/settings.gradle || \
-              sed -i '/plugins {/a\    id "com.google.gms.google-services" version "4.4.2" apply false' android/settings.gradle
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/applicationId ".*"/applicationId "com.puppypay.admin"/' android/app/build.gradle || true
+            sed -i 's/applicationId = ".*"/applicationId = "com.puppypay.admin"/' android/app/build.gradle || true
+            if ! grep -q 'com.google.gms.google-services' android/app/build.gradle; then
+              sed -i '/plugins {/a\    id "com.google.gms.google-services"' android/app/build.gradle
+            fi
           fi
           if [ -f android/settings.gradle.kts ]; then
-            grep -q 'com.google.gms.google-services' android/settings.gradle.kts || \
+            if ! grep -q 'com.google.gms.google-services' android/settings.gradle.kts; then
               sed -i '/plugins {/a\    id("com.google.gms.google-services") version("4.4.2") apply false' android/settings.gradle.kts
+            fi
           fi
-          if [ -f android/app/build.gradle ] && ! grep -q 'com.google.gms.google-services' android/app/build.gradle; then
-            sed -i '/plugins {/a\    id "com.google.gms.google-services"' android/app/build.gradle
+          if [ -f android/settings.gradle ]; then
+            if ! grep -q 'com.google.gms.google-services' android/settings.gradle; then
+              sed -i '/plugins {/a\    id "com.google.gms.google-services" version "4.4.2" apply false' android/settings.gradle
+            fi
           fi
-          if [ -f android/app/build.gradle.kts ] && ! grep -q 'com.google.gms.google-services' android/app/build.gradle.kts; then
-            sed -i '/plugins {/a\    id("com.google.gms.google-services")' android/app/build.gradle.kts
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if [ -f "$MANIFEST" ]; then
+            if ! grep -q 'POST_NOTIFICATIONS' "$MANIFEST"; then
+              sed -i '/<manifest /a\    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>\n    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>' "$MANIFEST"
+            fi
+            if ! grep -q 'default_notification_channel_id' "$MANIFEST"; then
+              sed -i '/<application/a\        <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="order_alerts" />' "$MANIFEST"
+            fi
           fi
+          test -f android/app/google-services.json && echo "google-services.json OK"
 
       - name: Get dependencies
         run: flutter pub get
