@@ -38,7 +38,7 @@ Future<void> setupAlertChannel() async {
       'Call-style Order Alerts',
       description: 'Continuous ring until you stop',
       importance: Importance.max,
-      playSound: false, // we play custom loop ourselves
+      playSound: false,
       enableVibration: true,
       vibrationPattern: Int64List.fromList([0, 600, 300, 600, 300, 900]),
       enableLights: true,
@@ -50,6 +50,7 @@ Future<void> setupAlertChannel() async {
 
 Future<void> startRing() async {
   try {
+    await ringPlayer.stop();
     await ringPlayer.setReleaseMode(ReleaseMode.loop);
     await ringPlayer.setVolume(1.0);
     await ringPlayer.play(AssetSource('sounds/alert_ring.mp3'));
@@ -117,11 +118,7 @@ Future<void> showEmergencyAlert({
 }
 
 @pragma('vm:entry-point')
-void onNotifBackground(NotificationResponse r) {
-  if (r.actionId == 'stop_ring') {
-    // Best-effort; full stop when app opens
-  }
-}
+void onNotifBackground(NotificationResponse r) {}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -147,7 +144,6 @@ Future<void> main() async {
     await androidPlugin?.requestFullScreenIntentPermission();
   } catch (_) {}
 
-  // Audio focus for loud playback
   try {
     await ringPlayer.setAudioContext(
       AudioContext(
@@ -322,6 +318,9 @@ class _HomePageState extends State<HomePage> {
   List withdrawals = [];
   String? fcmToken;
   String status = '';
+  final Set<String> _seenIds = {};
+  bool _seeded = false;
+  Timer? _pollTimer;
 
   Map<String, String> get headers => {
         'Content-Type': 'application/json',
@@ -334,20 +333,31 @@ class _HomePageState extends State<HomePage> {
     _boot();
   }
 
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _boot() async {
     await _setupFcm();
-    await _refresh();
+    await _refresh(isPoll: false);
+    // Fast poll — works even when FCM is broken (app must stay open)
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (alertsOn) _refresh(isPoll: true);
+    });
     FirebaseMessaging.onMessage.listen((m) async {
+      if (!alertsOn) return;
       await showEmergencyAlert(
         title: m.data['title'] ?? m.notification?.title ?? 'NEW ORDER',
         body: m.data['body'] ?? m.notification?.body ?? 'Open panel',
         data: m.data,
       );
-      _refresh();
+      _refresh(isPoll: false);
     });
     FirebaseMessaging.onMessageOpenedApp.listen((_) async {
       await stopRing();
-      _refresh();
+      _refresh(isPoll: false);
     });
   }
 
@@ -367,15 +377,17 @@ class _HomePageState extends State<HomePage> {
         if (data['device'] != null) {
           alertsOn = data['device']['alertsEnabled'] != false;
         }
-        setState(() => status = 'FCM OK');
+        setState(() => status = 'FCM OK · poll 5s');
       } catch (_) {
-        setState(() => status = 'FCM register failed');
+        setState(() => status = 'FCM fail · poll 5s still on');
       }
+    } else {
+      setState(() => status = 'No FCM token · poll 5s');
     }
   }
 
-  Future<void> _refresh() async {
-    setState(() => loading = true);
+  Future<void> _refresh({required bool isPoll}) async {
+    if (!isPoll) setState(() => loading = true);
     try {
       final results = await Future.wait([
         http.get(Uri.parse('$kApiBase/deposits/pending'), headers: headers),
@@ -383,12 +395,43 @@ class _HomePageState extends State<HomePage> {
       ]);
       final dep = jsonDecode(results[0].body);
       final wd = jsonDecode(results[1].body);
-      setState(() {
-        deposits = dep['deposits'] ?? [];
-        withdrawals = wd['withdrawals'] ?? [];
-      });
+      final newDeps = (dep['deposits'] as List?) ?? [];
+      final newWds = (wd['withdrawals'] as List?) ?? [];
+
+      final currentIds = <String>{};
+      for (final d in newDeps) {
+        currentIds.add('d_${d['_id']}');
+      }
+      for (final w in newWds) {
+        currentIds.add('w_${w['_id']}');
+      }
+
+      if (!_seeded) {
+        _seenIds.addAll(currentIds);
+        _seeded = true;
+      } else if (alertsOn) {
+        final fresh = currentIds.difference(_seenIds);
+        if (fresh.isNotEmpty) {
+          final hasW = fresh.any((id) => id.startsWith('w_'));
+          await showEmergencyAlert(
+            title: hasW ? 'NEW SELL / WITHDRAW' : 'NEW DEPOSIT',
+            body: '${fresh.length} new order(s) — open panel',
+            data: {'kind': hasW ? 'withdraw' : 'deposit'},
+          );
+        }
+      }
+      _seenIds
+        ..clear()
+        ..addAll(currentIds);
+
+      if (mounted) {
+        setState(() {
+          deposits = newDeps;
+          withdrawals = newWds;
+        });
+      }
     } catch (_) {}
-    setState(() => loading = false);
+    if (!isPoll && mounted) setState(() => loading = false);
   }
 
   Future<void> _toggleAlerts(bool v) async {
@@ -413,8 +456,12 @@ class _HomePageState extends State<HomePage> {
     final res = await http.post(Uri.parse('$kApiBase/fcm/test'), headers: headers);
     final data = jsonDecode(res.body);
     if (mounted) {
+      final ok = data['success'] == true;
+      final reason = data['result']?['reason'] ?? data['message'] ?? '';
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(data['success'] == true ? 'Remote test sent' : 'Remote test failed')),
+        SnackBar(
+          content: Text(ok ? 'Remote OK sent=${data['result']?['sent']}' : 'Remote FAIL $reason'),
+        ),
       );
     }
   }
@@ -425,7 +472,7 @@ class _HomePageState extends State<HomePage> {
         ? '/deposits/$id/${accept ? 'accept' : 'reject'}'
         : '/withdrawals/$id/${accept ? 'accept' : 'reject'}';
     await http.post(Uri.parse('$kApiBase$path'), headers: headers, body: '{}');
-    await _refresh();
+    await _refresh(isPoll: false);
   }
 
   @override
@@ -434,12 +481,12 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('PuppyPay Orders'),
         actions: [
-          IconButton(onPressed: _refresh, icon: const Icon(Icons.refresh)),
+          IconButton(onPressed: () => _refresh(isPoll: false), icon: const Icon(Icons.refresh)),
           IconButton(onPressed: widget.onLogout, icon: const Icon(Icons.logout)),
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: _refresh,
+        onRefresh: () => _refresh(isPoll: false),
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
@@ -454,7 +501,7 @@ class _HomePageState extends State<HomePage> {
                     child: FilledButton(
                       style: FilledButton.styleFrom(backgroundColor: Colors.red),
                       onPressed: stopRing,
-                      child: const Text('⏹ STOP RING', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+                      child: const Text('STOP RING', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
                     ),
                   ),
                 );
@@ -464,10 +511,10 @@ class _HomePageState extends State<HomePage> {
               color: alertsOn ? const Color(0xFF14532D) : const Color(0xFF450A0A),
               child: SwitchListTile(
                 title: Text(
-                  alertsOn ? 'Alerts ON' : 'Alerts OFF (class mode)',
+                  alertsOn ? 'Alerts ON' : 'Alerts OFF',
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
-                subtitle: Text(alertsOn ? 'Call-style ring on new orders' : 'Silent'),
+                subtitle: Text(alertsOn ? 'Poll every 5s + FCM' : 'Silent'),
                 value: alertsOn,
                 onChanged: _toggleAlerts,
               ),
@@ -521,7 +568,7 @@ class _HomePageState extends State<HomePage> {
                   kind: 'deposit',
                   id: '${d['_id']}',
                   amount: d['amount'] ?? d['total'],
-                  subtitle: 'UTR ${d['utr'] ?? '—'}\n${d['email'] ?? ''}',
+                  subtitle: 'UTR ${d['utr'] ?? '-'}\n${d['email'] ?? ''}',
                 )),
           ],
         ),
@@ -542,7 +589,7 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('₹${amount ?? 0}',
+            Text('Rs ${amount ?? 0}',
                 style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF60A5FA))),
             const SizedBox(height: 4),
             Text(subtitle, style: const TextStyle(color: Colors.white70, height: 1.35)),
