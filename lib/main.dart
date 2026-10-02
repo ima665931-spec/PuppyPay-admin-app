@@ -11,21 +11,37 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 const String kApiBase = 'https://puppy-pay-backend.vercel.app/api/admin';
-const String kChannelId = 'order_alerts_v3';
-const int kAlertNotifId = 99101;
+/// New channel so Android picks MAX + sound (old muted channels stay forever)
+const String kChannelId = 'order_alerts_v4';
+const int kAlertNotifId = 99104;
 
 final FlutterLocalNotificationsPlugin localNotifs = FlutterLocalNotificationsPlugin();
 final AudioPlayer ringPlayer = AudioPlayer();
 final ValueNotifier<bool> isRinging = ValueNotifier<bool>(false);
 
+Future<void> ensureLocalNotifsReady() async {
+  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+  await localNotifs.initialize(
+    const InitializationSettings(android: androidInit),
+    onDidReceiveNotificationResponse: (NotificationResponse r) async {
+      if (r.actionId == 'stop_ring') {
+        await stopRing();
+      }
+    },
+  );
+  await setupAlertChannel();
+}
+
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  await setupAlertChannel();
+  await ensureLocalNotifsReady();
   await showEmergencyAlert(
     title: message.data['title'] ?? message.notification?.title ?? 'NEW ORDER',
     body: message.data['body'] ?? message.notification?.body ?? 'Open PuppyPay Admin',
     data: message.data,
+    forceSystemSound: true, // background: system alarm sound (audioplayers may not run)
   );
 }
 
@@ -35,12 +51,12 @@ Future<void> setupAlertChannel() async {
   await android?.createNotificationChannel(
     AndroidNotificationChannel(
       kChannelId,
-      'Call-style Order Alerts',
-      description: 'Continuous ring until you stop',
+      'PuppyPay Order Alerts',
+      description: 'Loud alarm + vibration on new deposit/withdraw',
       importance: Importance.max,
-      playSound: false,
+      playSound: true,
       enableVibration: true,
-      vibrationPattern: Int64List.fromList([0, 600, 300, 600, 300, 900]),
+      vibrationPattern: Int64List.fromList([0, 1000, 400, 1000, 400, 1000, 400, 1500]),
       enableLights: true,
       ledColor: const Color(0xFFFF0000),
       audioAttributesUsage: AudioAttributesUsage.alarm,
@@ -57,6 +73,7 @@ Future<void> startRing() async {
     isRinging.value = true;
   } catch (e) {
     debugPrint('startRing error: $e');
+    isRinging.value = true; // still show STOP even if asset fails
   }
 }
 
@@ -74,12 +91,20 @@ Future<void> showEmergencyAlert({
   required String title,
   required String body,
   Map<String, dynamic>? data,
+  bool forceSystemSound = false,
 }) async {
   try {
     await HapticFeedback.heavyImpact();
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await HapticFeedback.heavyImpact();
   } catch (_) {}
 
-  await startRing();
+  // Foreground: loop custom ring. Background: rely on notification sound.
+  if (!forceSystemSound) {
+    await startRing();
+  } else {
+    isRinging.value = true;
+  }
 
   await localNotifs.show(
     kAlertNotifId,
@@ -88,28 +113,29 @@ Future<void> showEmergencyAlert({
     NotificationDetails(
       android: AndroidNotificationDetails(
         kChannelId,
-        'Call-style Order Alerts',
-        channelDescription: 'Continuous ring until you stop',
+        'PuppyPay Order Alerts',
+        channelDescription: 'Loud alarm + vibration on new deposit/withdraw',
         importance: Importance.max,
         priority: Priority.max,
-        playSound: false,
+        playSound: true,
         enableVibration: true,
-        vibrationPattern: Int64List.fromList([0, 600, 300, 600, 300, 900]),
+        vibrationPattern: Int64List.fromList([0, 1000, 400, 1000, 400, 1000, 400, 1500]),
         fullScreenIntent: true,
-        category: AndroidNotificationCategory.call,
+        category: AndroidNotificationCategory.alarm,
         visibility: NotificationVisibility.public,
         ongoing: true,
         autoCancel: false,
         ticker: 'NEW ORDER — PuppyPay',
         styleInformation: BigTextStyleInformation(body, contentTitle: title),
+        audioAttributesUsage: AudioAttributesUsage.alarm,
         actions: <AndroidNotificationAction>[
           const AndroidNotificationAction(
             'stop_ring',
-            'STOP RING',
+            'STOP',
             showsUserInterface: true,
             cancelNotification: false,
           ),
-          const AndroidNotificationAction('open', 'OPEN'),
+          const AndroidNotificationAction('open', 'OPEN APP'),
         ],
       ),
     ),
@@ -117,25 +143,12 @@ Future<void> showEmergencyAlert({
   );
 }
 
-@pragma('vm:entry-point')
-void onNotifBackground(NotificationResponse r) {}
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
-  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-  await localNotifs.initialize(
-    const InitializationSettings(android: androidInit),
-    onDidReceiveNotificationResponse: (NotificationResponse r) async {
-      if (r.actionId == 'stop_ring') {
-        await stopRing();
-      }
-    },
-    onDidReceiveBackgroundNotificationResponse: onNotifBackground,
-  );
-  await setupAlertChannel();
+  await ensureLocalNotifsReady();
 
   final androidPlugin = localNotifs.resolvePlatformSpecificImplementation<
       AndroidFlutterLocalNotificationsPlugin>();
@@ -275,7 +288,7 @@ class _LoginPageState extends State<LoginPage> {
             children: [
               const Text('PuppyPay Admin', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
               const SizedBox(height: 8),
-              const Text('Call-style order alerts', style: TextStyle(color: Colors.white54)),
+              const Text('Loud order alerts', style: TextStyle(color: Colors.white54)),
               const SizedBox(height: 32),
               TextField(controller: userCtrl, decoration: const InputDecoration(labelText: 'Username', border: OutlineInputBorder())),
               const SizedBox(height: 12),
@@ -342,8 +355,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _boot() async {
     await _setupFcm();
     await _refresh(isPoll: false);
-    // Fast poll — works even when FCM is broken (app must stay open)
-    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    // 3s poll — works even if FCM weak (keep app open / recent)
+    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (alertsOn) _refresh(isPoll: true);
     });
     FirebaseMessaging.onMessage.listen((m) async {
@@ -352,6 +365,7 @@ class _HomePageState extends State<HomePage> {
         title: m.data['title'] ?? m.notification?.title ?? 'NEW ORDER',
         body: m.data['body'] ?? m.notification?.body ?? 'Open panel',
         data: m.data,
+        forceSystemSound: false,
       );
       _refresh(isPoll: false);
     });
@@ -377,12 +391,12 @@ class _HomePageState extends State<HomePage> {
         if (data['device'] != null) {
           alertsOn = data['device']['alertsEnabled'] != false;
         }
-        setState(() => status = 'FCM OK · poll 5s');
+        setState(() => status = 'FCM OK · poll 3s');
       } catch (_) {
-        setState(() => status = 'FCM fail · poll 5s still on');
+        setState(() => status = 'FCM register fail · poll 3s');
       }
     } else {
-      setState(() => status = 'No FCM token · poll 5s');
+      setState(() => status = 'No FCM token · poll 3s');
     }
   }
 
@@ -393,6 +407,10 @@ class _HomePageState extends State<HomePage> {
         http.get(Uri.parse('$kApiBase/deposits/pending'), headers: headers),
         http.get(Uri.parse('$kApiBase/withdrawals/pending'), headers: headers),
       ]);
+      if (results[0].statusCode == 401 || results[1].statusCode == 401) {
+        setState(() => status = 'Session expired — login again');
+        return;
+      }
       final dep = jsonDecode(results[0].body);
       final wd = jsonDecode(results[1].body);
       final newDeps = (dep['deposits'] as List?) ?? [];
@@ -413,10 +431,19 @@ class _HomePageState extends State<HomePage> {
         final fresh = currentIds.difference(_seenIds);
         if (fresh.isNotEmpty) {
           final hasW = fresh.any((id) => id.startsWith('w_'));
+          String body = '${fresh.length} new order(s)';
+          if (hasW && newWds.isNotEmpty) {
+            final w = newWds.first;
+            body = 'Rs ${w['amount'] ?? ''} → ${w['destination'] ?? 'UPI'}';
+          } else if (newDeps.isNotEmpty) {
+            final d = newDeps.first;
+            body = 'Rs ${d['amount'] ?? d['total'] ?? ''} · UTR ${d['utr'] ?? '-'}';
+          }
           await showEmergencyAlert(
             title: hasW ? 'NEW SELL / WITHDRAW' : 'NEW DEPOSIT',
-            body: '${fresh.length} new order(s) — open panel',
+            body: body,
             data: {'kind': hasW ? 'withdraw' : 'deposit'},
+            forceSystemSound: false,
           );
         }
       }
@@ -428,9 +455,12 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           deposits = newDeps;
           withdrawals = newWds;
+          if (status.startsWith('Session')) status = 'FCM OK · poll 3s';
         });
       }
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) setState(() => status = 'API error — check network');
+    }
     if (!isPoll && mounted) setState(() => loading = false);
   }
 
@@ -447,8 +477,9 @@ class _HomePageState extends State<HomePage> {
   Future<void> _testLocal() async {
     await showEmergencyAlert(
       title: 'TEST — NEW ORDER',
-      body: 'Ring chalega jab tak STOP na dabao.',
+      body: 'Sound + vibration. STOP se band karo.',
       data: {'kind': 'test'},
+      forceSystemSound: false,
     );
   }
 
@@ -501,7 +532,7 @@ class _HomePageState extends State<HomePage> {
                     child: FilledButton(
                       style: FilledButton.styleFrom(backgroundColor: Colors.red),
                       onPressed: stopRing,
-                      child: const Text('STOP RING', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+                      child: const Text('STOP ALERT', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
                     ),
                   ),
                 );
@@ -514,7 +545,7 @@ class _HomePageState extends State<HomePage> {
                   alertsOn ? 'Alerts ON' : 'Alerts OFF',
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
-                subtitle: Text(alertsOn ? 'Poll every 5s + FCM' : 'Silent'),
+                subtitle: Text(alertsOn ? 'Sound + vibe · poll 3s' : 'Silent'),
                 value: alertsOn,
                 onChanged: _toggleAlerts,
               ),
@@ -525,7 +556,7 @@ class _HomePageState extends State<HomePage> {
                 Expanded(
                   child: FilledButton(
                     onPressed: _testLocal,
-                    child: const Text('Local TEST (ring)'),
+                    child: const Text('Local TEST'),
                   ),
                 ),
                 const SizedBox(width: 8),
