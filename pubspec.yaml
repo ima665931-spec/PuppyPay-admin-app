@@ -1,7 +1,7 @@
 name: puppypay_admin
 description: PuppyPay admin alert app — FCM order notifications
 publish_to: 'none'
-version: 1.1.0+2
+version: 1.2.0+3
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
