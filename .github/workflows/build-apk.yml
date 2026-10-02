@@ -26,7 +26,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
           mkdir -p assets/sounds
-          # Urgent alternating tones (call-like), 4s loop source
           ffmpeg -y -f lavfi -i "sine=frequency=1100:duration=0.2" \
             -f lavfi -i "sine=frequency=700:duration=0.2" \
             -filter_complex "[0:a][1:a]concat=n=2:v=0:a=1,aloop=loop=9:size=8820" \
@@ -45,12 +44,15 @@ jobs:
             cp /tmp/pp-fb/google-services.json android/app/google-services.json
           fi
 
-      - name: Configure Android for Firebase + desugaring
+      - name: Configure Android for Firebase + desugaring + permissions
         run: |
           set -e
           APP_GRADLE=android/app/build.gradle.kts
           SETTINGS=android/settings.gradle.kts
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+
           sed -i 's/applicationId = ".*"/applicationId = "com.puppypay.admin"/' "$APP_GRADLE"
+
           if ! grep -q 'com.google.gms.google-services' "$APP_GRADLE"; then
             sed -i '/^plugins {/a\    id("com.google.gms.google-services")' "$APP_GRADLE"
           fi
@@ -67,7 +69,31 @@ jobs:
               printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> "$APP_GRADLE"
             fi
           fi
+
+          # Permissions for alarm-style alerts
+          if ! grep -q 'android.permission.VIBRATE' "$MANIFEST"; then
+            sed -i 's|<manifest |<manifest |' "$MANIFEST"
+            # Insert permissions right after <manifest ...>
+            python3 - <<'PY'
+from pathlib import Path
+p = Path("android/app/src/main/AndroidManifest.xml")
+t = p.read_text()
+perms = '''
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+'''
+if "android.permission.VIBRATE" not in t:
+    t = t.replace("<application", perms + "    <application", 1)
+    p.write_text(t)
+print("manifest ok")
+PY
+          fi
+
           ls -la android/app/google-services.json
+          head -40 "$MANIFEST"
 
       - run: flutter pub get
 
